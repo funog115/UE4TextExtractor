@@ -2,7 +2,7 @@ name: Windows build and LocRes hash round-trip
 
 on:
   push:
-    branches: [ master, "feature/**" ]
+    branches: [ master ]
   pull_request:
   workflow_dispatch:
 
