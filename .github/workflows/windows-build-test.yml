@@ -65,3 +65,13 @@ jobs:
           if ($roundTrip -notmatch 'Hello from CI') { throw "Localized string was not preserved." }
 
           Write-Host "LocRes v2 namespace/key/value hash round-trip passed."
+
+      - name: Upload Windows x64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: UE4TextExtractor-windows-x64
+          path: |
+            x64/Release/UE4TextExtractor.exe
+            Release/UE4TextExtractor.exe
+          if-no-files-found: error
+          retention-days: 14
