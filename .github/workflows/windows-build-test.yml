@@ -38,14 +38,15 @@ jobs:
           $locres = Join-Path $PWD 'locres-hash-roundtrip.locres'
           $outputTxt = Join-Path $PWD 'locres-hash-roundtrip-output.txt'
 
-          @'
+          $fixture = @'
           =>{MyNamespace}[NSHASH:1A2B3C4D]
 
           =>[MyKey][305419896][KEYHASH:A1B2C3D4]
           Hello from CI
 
           =>{[END]}
-          '@ | Set-Content -Encoding utf8 $inputTxt
+          '@
+          [System.IO.File]::WriteAllText($inputTxt, $fixture, [System.Text.UTF8Encoding]::new($false))
 
           & $exe $inputTxt $locres
           if ($LASTEXITCODE -ne 0) { throw "TXT -> LocRes conversion failed with exit code $LASTEXITCODE" }
