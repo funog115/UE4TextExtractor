@@ -1,0 +1,77 @@
+name: Windows build and LocRes hash round-trip
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        run: msbuild UE4TextExtractor.sln /m /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0.26100.0 /verbosity:minimal
+
+      - name: Test LocRes v2 hash round-trip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'x64/Release/UE4TextExtractor.exe'
+          if (-not (Test-Path $exe)) {
+            $exe = Join-Path $PWD 'Release/UE4TextExtractor.exe'
+          }
+          if (-not (Test-Path $exe)) {
+            throw "Built executable not found."
+          }
+
+          $inputTxt = Join-Path $PWD 'locres-hash-roundtrip-input.txt'
+          $locres = Join-Path $PWD 'locres-hash-roundtrip.locres'
+          $outputTxt = Join-Path $PWD 'locres-hash-roundtrip-output.txt'
+
+          $fixture = @'
+          =>{MyNamespace}[NSHASH:1A2B3C4D]
+
+          =>[MyKey][305419896][KEYHASH:A1B2C3D4]
+          Hello from CI
+
+          =>{[END]}
+          '@
+          [System.IO.File]::WriteAllText($inputTxt, $fixture, [System.Text.UTF8Encoding]::new($false))
+
+          & $exe $inputTxt $locres
+          if ($LASTEXITCODE -ne 0) { throw "TXT -> LocRes conversion failed with exit code $LASTEXITCODE" }
+          & $exe $locres $outputTxt
+          if ($LASTEXITCODE -ne 0) { throw "LocRes -> TXT conversion failed with exit code $LASTEXITCODE" }
+
+          $bytes = [System.IO.File]::ReadAllBytes($locres)
+          if ($bytes.Length -lt 17 -or $bytes[16] -ne 2) {
+            throw "Output is not a standard LocRes v2 file (expected version byte 02)."
+          }
+
+          $roundTrip = Get-Content -Raw -Encoding utf8 $outputTxt
+          if ($roundTrip -notmatch '\[NSHASH:1A2B3C4D\]') { throw "Namespace hash was not preserved." }
+          if ($roundTrip -notmatch '\[KEYHASH:A1B2C3D4\]') { throw "Key hash was not preserved." }
+          if ($roundTrip -notmatch '\[MyKey\]\[305419896\]') { throw "Value hash or key was not preserved." }
+          if ($roundTrip -notmatch 'Hello from CI') { throw "Localized string was not preserved." }
+
+          Write-Host "LocRes v2 namespace/key/value hash round-trip passed."
+
+      - name: Upload Windows x64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: UE4TextExtractor-windows-x64
+          path: |
+            x64/Release/UE4TextExtractor.exe
+            Release/UE4TextExtractor.exe
+          if-no-files-found: error
+          retention-days: 14

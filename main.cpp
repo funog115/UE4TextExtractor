@@ -9,6 +9,7 @@
 #include <map>
 #include <codecvt>
 #include <sstream>
+#include <iomanip>
 
 #include <windows.h>
 
@@ -757,13 +758,27 @@ std::wstring unescape_key(std::wstring key)
 struct FEntry
 {
 	std::wstring key;
-	uint32_t hash;
+	uint32_t hash; // Existing localized/source value hash
 	std::wstring s;
 
 	std::wstring src;
+	uint32_t namespace_hash = 0;
+	uint32_t key_hash = 0;
 };
 
 using locres_vector = std::vector<std::pair<std::wstring, std::vector<FEntry>>>;
+
+uint32_t parse_hex_hash(std::wstring const& value)
+{
+	return static_cast<uint32_t>(std::stoul(value, nullptr, 16));
+}
+
+std::wstring format_hex_hash(uint32_t value)
+{
+	std::wstringstream stream;
+	stream << std::uppercase << std::hex << std::setw(8) << std::setfill(L'0') << value;
+	return stream.str();
+}
 
 locres_vector read_txt_file(std::filesystem::path file)
 {
@@ -780,6 +795,7 @@ locres_vector read_txt_file(std::filesystem::path file)
 
 	std::wstring line;
 	int mode = 0;
+	uint32_t current_namespace_hash = 0;
 	while (std::getline(stream, line))
 	{
 		if (4 < line.length() && line.substr(0, 4) == L"=># ")
@@ -798,8 +814,22 @@ locres_vector read_txt_file(std::filesystem::path file)
 			line = line.substr(3);
 			const auto key = unescape_key(line.substr(0, line.find(L"]")));
 			line = line.substr(line.find(L"[") + 1);
-			const auto hash = std::stoul(line.substr(0, line.find(L"]")));
-			lv.back().second.push_back(FEntry{ key, hash, L"" });
+			const auto hash = static_cast<uint32_t>(std::stoul(line.substr(0, line.find(L"]"))));
+
+			uint32_t key_hash = 0;
+			const auto key_hash_marker = line.find(L"[KEYHASH:");
+			if (key_hash_marker != std::wstring::npos)
+			{
+				const auto hash_start = key_hash_marker + 9;
+				const auto hash_end = line.find(L"]", hash_start);
+				if (hash_end != std::wstring::npos)
+					key_hash = parse_hex_hash(line.substr(hash_start, hash_end - hash_start));
+			}
+
+			FEntry entry{ key, hash, L"" };
+			entry.namespace_hash = current_namespace_hash;
+			entry.key_hash = key_hash;
+			lv.back().second.push_back(std::move(entry));
 			mode = 1;
 			continue;
 		}
@@ -808,9 +838,21 @@ locres_vector read_txt_file(std::filesystem::path file)
 			if (mode == 1)
 				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
 
-			const auto ns = unescape_key(line.substr(3, line.find(L"}") - 3));
+			const auto namespace_end = line.find(L"}");
+			const auto ns = unescape_key(line.substr(3, namespace_end - 3));
 			if (ns == L"[END]")
 				break;
+
+			current_namespace_hash = 0;
+			const auto namespace_hash_marker = line.find(L"[NSHASH:", namespace_end);
+			if (namespace_hash_marker != std::wstring::npos)
+			{
+				const auto hash_start = namespace_hash_marker + 8;
+				const auto hash_end = line.find(L"]", hash_start);
+				if (hash_end != std::wstring::npos)
+					current_namespace_hash = parse_hex_hash(line.substr(hash_start, hash_end - hash_start));
+			}
+
 			lv.emplace_back();
 			lv.back().first = ns;
 			mode = 0;
@@ -831,7 +873,9 @@ void write_to_txt_file(locres_vector const& lv, std::filesystem::path file, bool
 	for (auto const& ns : lv)
 	{
 		const auto escaped_ns = converter.to_bytes(escape_key(ns.first));
-		fout << "=>{" << escaped_ns << "}" << '\r' << '\n' << '\r' << '\n';
+		const uint32_t namespace_hash = ns.second.empty() ? 0 : ns.second.front().namespace_hash;
+		const auto namespace_hash_text = converter.to_bytes(format_hex_hash(namespace_hash));
+		fout << "=>{" << escaped_ns << "}[NSHASH:" << namespace_hash_text << "]" << '\r' << '\n' << '\r' << '\n';
 		for (auto const& text : ns.second)
 		{
 			if (src && text.src != last_src)
@@ -842,7 +886,8 @@ void write_to_txt_file(locres_vector const& lv, std::filesystem::path file, bool
 			}
 			const auto escaped_key = converter.to_bytes(escape_key(text.key));
 			const auto s = converter.to_bytes(text.s);
-			fout << "=>[" << escaped_key << "][" << text.hash << "]" << '\r' << '\n' << s << '\r' << '\n' << '\r' << '\n';
+			const auto key_hash_text = converter.to_bytes(format_hex_hash(text.key_hash));
+			fout << "=>[" << escaped_key << "][" << text.hash << "][KEYHASH:" << key_hash_text << "]" << '\r' << '\n' << s << '\r' << '\n' << '\r' << '\n';
 		}
 	}
 	fout << "=>{[END]}" << '\r' << '\n' << std::flush;
@@ -862,12 +907,18 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 	{
 		fout.write(reinterpret_cast<const char*>(magic.data()), magic.size());
 
-		const uint8_t version = 1;
+		const uint8_t version = 2;
 		fout.write(reinterpret_cast<const char*>(&version), sizeof(uint8_t));
 
 		const int64_t strings_array_offset_placeholder = 0;
 		strings_array_offset_placeholder_offset = fout.tellp();
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset_placeholder), sizeof(int64_t));
+
+		// LocRes v2 stores the total number of localized entries here.
+		uint32_t localized_entry_count = 0;
+		for (auto const& ns : lv)
+			localized_entry_count += static_cast<uint32_t>(ns.second.size());
+		fout.write(reinterpret_cast<const char*>(&localized_entry_count), sizeof(uint32_t));
 	}
 
 	const uint32_t namespace_count = static_cast<const uint32_t>(lv.size());
@@ -911,11 +962,18 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 
 	for (auto const& ns : lv)
 	{
+		if (!old)
+		{
+			const uint32_t namespace_hash = ns.second.empty() ? 0 : ns.second.front().namespace_hash;
+			fout.write(reinterpret_cast<const char*>(&namespace_hash), sizeof(uint32_t));
+		}
 		write_string(ns.first);
 		const uint32_t key_count = static_cast<const uint32_t>(ns.second.size());
 		fout.write(reinterpret_cast<const char*>(&key_count), sizeof(uint32_t));
 		for (auto const& text : ns.second)
 		{
+			if (!old)
+				fout.write(reinterpret_cast<const char*>(&text.key_hash), sizeof(uint32_t));
 			write_string(text.key);
 			fout.write(reinterpret_cast<const char*>(&text.hash), sizeof(uint32_t));
 			if (!old)
@@ -946,7 +1004,11 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 		const uint32_t strings_array_count = static_cast<uint32_t>(strings.size());
 		fout.write(reinterpret_cast<const char*>(&strings_array_count), sizeof(uint32_t));
 		for (auto const& s : strings)
+		{
 			write_string(s);
+			const uint32_t string_hash = crc32::StrCrc32(s);
+			fout.write(reinterpret_cast<const char*>(&string_hash), sizeof(uint32_t));
+		}
 		fout.seekp(strings_array_offset_placeholder_offset);
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset), sizeof(int64_t));
 	}
@@ -1164,8 +1226,12 @@ int wmain(int argc, wchar_t ** argv)
 
 		for (size_t i = 0; i < namespace_count; ++i)
 		{
+			uint32_t namespace_hash = 0;
 			if (2 <= version)
+			{
+				namespace_hash = *reinterpret_cast<const uint32_t*>(buffer.data() + index);
 				index += sizeof(uint32_t);
+			}
 
 			const auto ns = read_string();
 
@@ -1178,8 +1244,12 @@ int wmain(int argc, wchar_t ** argv)
 
 			for (size_t j = 0; j < key_count; ++j)
 			{
+				uint32_t key_hash = 0;
 				if (2 <= version)
+				{
+					key_hash = *reinterpret_cast<const uint32_t*>(buffer.data() + index);
 					index += sizeof(uint32_t);
+				}
 
 				const auto key = read_string();
 
@@ -1201,7 +1271,10 @@ int wmain(int argc, wchar_t ** argv)
 				if (4 <= version) // WARNING: LocRes version 4 is undocumented: https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Runtime/Core/Internationalization/FTextLocalizationResourceVersion/ELocResVersion
 					index += sizeof(uint32_t);
 
-				lv.back().second.push_back(FEntry{ key, hash, str });
+				FEntry entry{ key, hash, str };
+				entry.namespace_hash = namespace_hash;
+				entry.key_hash = key_hash;
+				lv.back().second.push_back(std::move(entry));
 			}
 		}
 
@@ -1237,6 +1310,8 @@ int wmain(int argc, wchar_t ** argv)
 						if (text_dst.key == text_src.key && text_dst.hash == text_src.hash)
 							return text_dst;
 					ns.second.emplace_back(FEntry{ text_src.key, text_src.hash });
+					ns.second.back().namespace_hash = text_src.namespace_hash;
+					ns.second.back().key_hash = text_src.key_hash;
 					return ns.second.back();
 				}();
 				text.s = text_src.s;
