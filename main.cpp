@@ -914,9 +914,11 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 		strings_array_offset_placeholder_offset = fout.tellp();
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset_placeholder), sizeof(int64_t));
 
-		// LocRes v2 has a 32-bit field between the string-table offset and namespace count.
-		const uint32_t v2_header_field = 0;
-		fout.write(reinterpret_cast<const char*>(&v2_header_field), sizeof(uint32_t));
+		// LocRes v2 stores the total number of localized entries here.
+		uint32_t localized_entry_count = 0;
+		for (auto const& ns : lv)
+			localized_entry_count += static_cast<uint32_t>(ns.second.size());
+		fout.write(reinterpret_cast<const char*>(&localized_entry_count), sizeof(uint32_t));
 	}
 
 	const uint32_t namespace_count = static_cast<const uint32_t>(lv.size());
