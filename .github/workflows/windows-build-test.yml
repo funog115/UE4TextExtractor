@@ -1,0 +1,66 @@
+name: Windows build and LocRes hash round-trip
+
+on:
+  push:
+    branches: [ master, "feature/**" ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        run: msbuild UE4TextExtractor.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+
+      - name: Test LocRes v2 hash round-trip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'x64/Release/UE4TextExtractor.exe'
+          if (-not (Test-Path $exe)) {
+            $exe = Join-Path $PWD 'Release/UE4TextExtractor.exe'
+          }
+          if (-not (Test-Path $exe)) {
+            throw "Built executable not found."
+          }
+
+          $inputTxt = Join-Path $PWD 'locres-hash-roundtrip-input.txt'
+          $locres = Join-Path $PWD 'locres-hash-roundtrip.locres'
+          $outputTxt = Join-Path $PWD 'locres-hash-roundtrip-output.txt'
+
+          @'
+          =>{MyNamespace}[NSHASH:1A2B3C4D]
+
+          =>[MyKey][305419896][KEYHASH:A1B2C3D4]
+          Hello from CI
+
+          =>{[END]}
+          '@ | Set-Content -Encoding utf8 $inputTxt
+
+          & $exe $inputTxt $locres
+          if ($LASTEXITCODE -ne 0) { throw "TXT -> LocRes conversion failed with exit code $LASTEXITCODE" }
+          & $exe $locres $outputTxt
+          if ($LASTEXITCODE -ne 0) { throw "LocRes -> TXT conversion failed with exit code $LASTEXITCODE" }
+
+          $bytes = [System.IO.File]::ReadAllBytes($locres)
+          if ($bytes.Length -lt 17 -or $bytes[16] -ne 2) {
+            throw "Output is not a standard LocRes v2 file (expected version byte 02)."
+          }
+
+          $roundTrip = Get-Content -Raw -Encoding utf8 $outputTxt
+          if ($roundTrip -notmatch '\[NSHASH:1A2B3C4D\]') { throw "Namespace hash was not preserved." }
+          if ($roundTrip -notmatch '\[KEYHASH:A1B2C3D4\]') { throw "Key hash was not preserved." }
+          if ($roundTrip -notmatch '\[MyKey\]\[305419896\]') { throw "Value hash or key was not preserved." }
+          if ($roundTrip -notmatch 'Hello from CI') { throw "Localized string was not preserved." }
+
+          Write-Host "LocRes v2 namespace/key/value hash round-trip passed."
