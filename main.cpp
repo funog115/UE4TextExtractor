@@ -695,7 +695,7 @@ void print_help()
 {
 	std::wcout
 		<< L"Extract localizable texts to locres or txt file:" << std::endl
-		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.locres file> [-old] [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps]" << std::endl
+		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.locres file> [-old|-v3] [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps]" << std::endl
 		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.txt file> [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps] [-src]" << std::endl
 		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\unpacked" "C:\MyGame\Content\Paks\texts.locres")" << std::endl
 		<< std::endl
@@ -706,12 +706,12 @@ void print_help()
 		<< std::endl
 
 		<< L"Convert locres to txt or backward:" << std::endl
-		<< L"UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old]" << std::endl
+		<< L"UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old|-v3]" << std::endl
 		<< L"UE4TextExtractor.exe <path to texts.locres file> <path to texts.txt file>" << std::endl
 		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\texts.txt" "C:\MyGame\Content\Paks\texts.locres")" << std::endl
 		<< std::endl
 
-		<< L"Use -old modifier for old-version locres file generation." << std::endl
+		<< L"Use -old for legacy locres output, or -v3 to generate a version 3 locres file." << std::endl
 		<< std::endl
 
 		<< L"Add or replace all texts from one txt to another:" << std::endl
@@ -852,7 +852,7 @@ static const auto magic = std::vector<unsigned char>{
 	0x0E, 0x14, 0x74, 0x75, 0x67, 0x4A, 0x03, 0xFC, 0x4A, 0x15, 0x90, 0x9D, 0xC3, 0x37, 0x7F, 0x1B
 };
 
-void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::path file)
+void write_to_locres_file(bool old, bool version3, locres_vector const& lv, std::filesystem::path file)
 {
 	auto fout = std::ofstream{ file, std::ios::binary | std::ios::out };
 
@@ -862,12 +862,18 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 	{
 		fout.write(reinterpret_cast<const char*>(magic.data()), magic.size());
 
-		const uint8_t version = 1;
+		const uint8_t version = version3 ? 3 : 1;
 		fout.write(reinterpret_cast<const char*>(&version), sizeof(uint8_t));
 
 		const int64_t strings_array_offset_placeholder = 0;
 		strings_array_offset_placeholder_offset = fout.tellp();
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset_placeholder), sizeof(int64_t));
+
+		if (version3)
+		{
+			const uint32_t resource_hash = 0;
+			fout.write(reinterpret_cast<const char*>(&resource_hash), sizeof(uint32_t));
+		}
 	}
 
 	const uint32_t namespace_count = static_cast<const uint32_t>(lv.size());
@@ -911,11 +917,21 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 
 	for (auto const& ns : lv)
 	{
+		if (version3)
+		{
+			const uint32_t namespace_hash = crc32::StrCrc32(ns.first);
+			fout.write(reinterpret_cast<const char*>(&namespace_hash), sizeof(uint32_t));
+		}
 		write_string(ns.first);
 		const uint32_t key_count = static_cast<const uint32_t>(ns.second.size());
 		fout.write(reinterpret_cast<const char*>(&key_count), sizeof(uint32_t));
 		for (auto const& text : ns.second)
 		{
+			if (version3)
+			{
+				const uint32_t key_hash = crc32::StrCrc32(text.key);
+				fout.write(reinterpret_cast<const char*>(&key_hash), sizeof(uint32_t));
+			}
 			write_string(text.key);
 			fout.write(reinterpret_cast<const char*>(&text.hash), sizeof(uint32_t));
 			if (!old)
@@ -970,6 +986,7 @@ int wmain(int argc, wchar_t ** argv)
 	}
 
 	constexpr std::wstring_view old_argument = L"-old";
+	constexpr std::wstring_view version3_argument = L"-v3";
 	constexpr std::wstring_view raw_text_signatures_argument = L"-raw-text-signatures=";
 	constexpr std::wstring_view all_uexps_argument = L"-all-uexps";
 	constexpr std::wstring_view src_argument = L"-src";
@@ -977,6 +994,7 @@ int wmain(int argc, wchar_t ** argv)
 	const auto path_left = std::filesystem::path(args[1]);
 	const auto path_right = std::filesystem::path(args[2]);
 	bool old = false;
+	bool version3 = false;
 	bool all_uexps = false;
 	std::vector<std::string> raw_text_signatures;
 	bool src = false;
@@ -986,6 +1004,11 @@ int wmain(int argc, wchar_t ** argv)
 		if (args[i] == old_argument)
 		{
 			old = true;
+			continue;
+		}
+		if (args[i] == version3_argument)
+		{
+			version3 = true;
 			continue;
 		}
 		if (args[i] == all_uexps_argument)
@@ -1052,7 +1075,7 @@ int wmain(int argc, wchar_t ** argv)
 		}
 		else if (path_right.extension() == L".locres")
 		{
-			write_to_locres_file(old, lv, path_right);
+			write_to_locres_file(old, version3, lv, path_right);
 			return 0;
 		}
 		else
@@ -1212,7 +1235,7 @@ int wmain(int argc, wchar_t ** argv)
 	else if (path_left.extension() == L".txt" && path_right.extension() == L".locres")
 	{
 		const auto lv = read_txt_file(path_left);
-		write_to_locres_file(old, lv, path_right);
+		write_to_locres_file(old, version3, lv, path_right);
 		return 0;
 	}
 	else if (path_left.extension() == L".txt" && path_right.extension() == L".txt")
