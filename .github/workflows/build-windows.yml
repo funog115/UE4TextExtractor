@@ -58,17 +58,20 @@ jobs:
 
           # No arguments must display usage and return a non-zero exit code.
           & $exe *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $noArgsExitCode = $LASTEXITCODE
+          if ($noArgsExitCode -eq 0) {
             throw "Expected usage invocation without arguments to return non-zero."
           }
 
           # Conflicting output formats must be rejected before touching files.
           & $exe "unused.txt" "unused.locres" -old -v3 *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $conflictExitCode = $LASTEXITCODE
+          if ($conflictExitCode -eq 0) {
             throw "Expected -old and -v3 together to be rejected."
           }
 
           Write-Host "CLI smoke tests passed."
+          exit 0
 
       - name: Stage executable artifact
         if: success()
