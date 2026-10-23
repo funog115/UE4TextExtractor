@@ -40,7 +40,9 @@ jobs:
       - name: Build Release x64
         shell: pwsh
         run: |
-          msbuild UE4TextExtractor.vcxproj /m /nologo /v:minimal /t:Rebuild /p:Configuration=Release /p:Platform=x64
+          # The project pins an older SDK not installed on current hosted runners.
+          # Override it with the Windows 11 SDK shipped on the Windows Server 2025 image.
+          msbuild UE4TextExtractor.vcxproj /m /nologo /v:minimal /t:Rebuild /p:Configuration=Release /p:Platform=x64 /p:WindowsTargetPlatformVersion=10.0.26100.0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test command-line behavior
@@ -66,8 +68,6 @@ jobs:
             throw "Expected -old and -v3 together to be rejected."
           }
 
-          # Version 3 generation is a format capability, not game-specific behavior.
-          # Full binary round-trip fixtures can be added separately.
           Write-Host "CLI smoke tests passed."
 
       - name: Stage executable artifact
