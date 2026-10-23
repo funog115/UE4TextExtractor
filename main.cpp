@@ -9,6 +9,7 @@
 #include <map>
 #include <codecvt>
 #include <sstream>
+#include <stdexcept>
 
 #include <windows.h>
 
@@ -779,7 +780,7 @@ locres_vector read_txt_file(std::filesystem::path file)
 
 	auto buffer = std::vector<char>(static_cast<size_t>(file_size) + 1, '\0');
 	fin.seekg(0, std::ios::beg);
-	if (!fin.read(buffer.data(), file_size))
+	if (!fin.read(buffer.data(), static_cast<std::streamsize>(file_size)))
 		throw std::runtime_error("Could not read input TXT file.");
 
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
