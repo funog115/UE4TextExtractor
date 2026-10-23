@@ -962,7 +962,14 @@ void write_to_locres_file(bool old, bool version3, locres_vector const& lv, std:
 		const uint32_t strings_array_count = static_cast<uint32_t>(strings.size());
 		fout.write(reinterpret_cast<const char*>(&strings_array_count), sizeof(uint32_t));
 		for (auto const& s : strings)
+		{
 			write_string(s);
+			if (version3)
+			{
+				const uint32_t string_hash = crc32::StrCrc32(s);
+				fout.write(reinterpret_cast<const char*>(&string_hash), sizeof(uint32_t));
+			}
+		}
 		fout.seekp(strings_array_offset_placeholder_offset);
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset), sizeof(int64_t));
 	}
