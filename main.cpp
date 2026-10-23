@@ -9,6 +9,7 @@
 #include <map>
 #include <codecvt>
 #include <sstream>
+#include <stdexcept>
 
 #include <windows.h>
 
@@ -695,7 +696,7 @@ void print_help()
 {
 	std::wcout
 		<< L"Extract localizable texts to locres or txt file:" << std::endl
-		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.locres file> [-old] [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps]" << std::endl
+		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.locres file> [-old|-v3] [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps]" << std::endl
 		<< L"UE4TextExtractor.exe <path to folder with extracted from pak files> <path to texts.txt file> [-raw-text-signatures=<signature1>,<signature2>,...] [-all-uexps] [-src]" << std::endl
 		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\unpacked" "C:\MyGame\Content\Paks\texts.locres")" << std::endl
 		<< std::endl
@@ -706,12 +707,12 @@ void print_help()
 		<< std::endl
 
 		<< L"Convert locres to txt or backward:" << std::endl
-		<< L"UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old]" << std::endl
+		<< L"UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old|-v3]" << std::endl
 		<< L"UE4TextExtractor.exe <path to texts.locres file> <path to texts.txt file>" << std::endl
 		<< LR"(Example: UE4TextExtractor.exe "C:\MyGame\Content\Paks\texts.txt" "C:\MyGame\Content\Paks\texts.locres")" << std::endl
 		<< std::endl
 
-		<< L"Use -old modifier for old-version locres file generation." << std::endl
+		<< L"Use -old for legacy locres output, or -v3 to generate a version 3 locres file." << std::endl
 		<< std::endl
 
 		<< L"Add or replace all texts from one txt to another:" << std::endl
@@ -770,12 +771,34 @@ locres_vector read_txt_file(std::filesystem::path file)
 	locres_vector lv;
 
 	auto fin = std::ifstream{ file, std::ios::binary | std::ios::ate };
-	auto buffer = std::vector<char>(static_cast<size_t>(fin.tellg()) + 1);
+	if (fin.fail())
+		throw std::runtime_error("Could not open input TXT file.");
+
+	const auto file_size = fin.tellg();
+	if (file_size < 0)
+		throw std::runtime_error("Could not determine input TXT file size.");
+
+	auto buffer = std::vector<char>(static_cast<size_t>(file_size) + 1, '\0');
 	fin.seekg(0, std::ios::beg);
-	fin.read(buffer.data(), buffer.size() - 1);
+	if (!fin.read(buffer.data(), static_cast<std::streamsize>(file_size)))
+		throw std::runtime_error("Could not read input TXT file.");
 
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-	std::wstring lines = converter.from_bytes(buffer.data());
+	std::wstring lines;
+	try
+	{
+		lines = converter.from_bytes(buffer.data());
+	}
+	catch (std::exception const&)
+	{
+		throw std::runtime_error("Input TXT is not valid UTF-8.");
+	}
+
+	// Text editors commonly save UTF-8 files with a BOM. It is not part of
+	// the first namespace header, so remove it before parsing.
+	if (!lines.empty() && lines.front() == 0xFEFF)
+		lines.erase(lines.begin());
+
 	auto stream = std::wstringstream{ lines };
 
 	std::wstring line;
@@ -796,10 +819,27 @@ locres_vector read_txt_file(std::filesystem::path file)
 				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
 
 			line = line.substr(3);
-			const auto key = unescape_key(line.substr(0, line.find(L"]")));
-			line = line.substr(line.find(L"[") + 1);
-			const auto hash = std::stoul(line.substr(0, line.find(L"]")));
-			lv.back().second.push_back(FEntry{ key, hash, L"" });
+			const auto key_end = line.find(L"]");
+			const auto hash_start = line.find(L"[");
+			const auto hash_end = line.find(L"]", hash_start == std::wstring::npos ? 0 : hash_start + 1);
+			if (key_end == std::wstring::npos || hash_start == std::wstring::npos || hash_end == std::wstring::npos || hash_start < key_end)
+				throw std::runtime_error("Malformed key/hash entry in TXT file.");
+			const auto key = unescape_key(line.substr(0, key_end));
+			const auto hash_text = line.substr(hash_start + 1, hash_end - hash_start - 1);
+			if (lv.empty())
+				throw std::runtime_error("TXT entry appeared before a namespace header.");
+			if (hash_text.empty())
+				throw std::runtime_error("TXT entry has an empty hash.");
+			unsigned long parsed_hash = 0;
+			try
+			{
+				parsed_hash = std::stoul(hash_text);
+			}
+			catch (std::exception const&)
+			{
+				throw std::runtime_error("TXT entry has an invalid hash: " + converter.to_bytes(hash_text));
+			}
+			lv.back().second.push_back(FEntry{ key, static_cast<uint32_t>(parsed_hash), L"" });
 			mode = 1;
 			continue;
 		}
@@ -808,7 +848,10 @@ locres_vector read_txt_file(std::filesystem::path file)
 			if (mode == 1)
 				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
 
-			const auto ns = unescape_key(line.substr(3, line.find(L"}") - 3));
+			const auto closing_brace = line.find(L"}");
+			if (closing_brace == std::wstring::npos)
+				throw std::runtime_error("Malformed namespace header in TXT file.");
+			const auto ns = unescape_key(line.substr(3, closing_brace - 3));
 			if (ns == L"[END]")
 				break;
 			lv.emplace_back();
@@ -852,7 +895,7 @@ static const auto magic = std::vector<unsigned char>{
 	0x0E, 0x14, 0x74, 0x75, 0x67, 0x4A, 0x03, 0xFC, 0x4A, 0x15, 0x90, 0x9D, 0xC3, 0x37, 0x7F, 0x1B
 };
 
-void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::path file)
+void write_to_locres_file(bool old, bool version3, locres_vector const& lv, std::filesystem::path file)
 {
 	auto fout = std::ofstream{ file, std::ios::binary | std::ios::out };
 
@@ -862,12 +905,18 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 	{
 		fout.write(reinterpret_cast<const char*>(magic.data()), magic.size());
 
-		const uint8_t version = 1;
+		const uint8_t version = version3 ? 3 : 1;
 		fout.write(reinterpret_cast<const char*>(&version), sizeof(uint8_t));
 
 		const int64_t strings_array_offset_placeholder = 0;
 		strings_array_offset_placeholder_offset = fout.tellp();
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset_placeholder), sizeof(int64_t));
+
+		if (version3)
+		{
+			const uint32_t resource_hash = 0;
+			fout.write(reinterpret_cast<const char*>(&resource_hash), sizeof(uint32_t));
+		}
 	}
 
 	const uint32_t namespace_count = static_cast<const uint32_t>(lv.size());
@@ -911,11 +960,21 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 
 	for (auto const& ns : lv)
 	{
+		if (version3)
+		{
+			const uint32_t namespace_hash = crc32::StrCrc32(ns.first);
+			fout.write(reinterpret_cast<const char*>(&namespace_hash), sizeof(uint32_t));
+		}
 		write_string(ns.first);
 		const uint32_t key_count = static_cast<const uint32_t>(ns.second.size());
 		fout.write(reinterpret_cast<const char*>(&key_count), sizeof(uint32_t));
 		for (auto const& text : ns.second)
 		{
+			if (version3)
+			{
+				const uint32_t key_hash = crc32::StrCrc32(text.key);
+				fout.write(reinterpret_cast<const char*>(&key_hash), sizeof(uint32_t));
+			}
 			write_string(text.key);
 			fout.write(reinterpret_cast<const char*>(&text.hash), sizeof(uint32_t));
 			if (!old)
@@ -946,7 +1005,14 @@ void write_to_locres_file(bool old, locres_vector const& lv, std::filesystem::pa
 		const uint32_t strings_array_count = static_cast<uint32_t>(strings.size());
 		fout.write(reinterpret_cast<const char*>(&strings_array_count), sizeof(uint32_t));
 		for (auto const& s : strings)
+		{
 			write_string(s);
+			if (version3)
+			{
+				const uint32_t string_hash = crc32::StrCrc32(s);
+				fout.write(reinterpret_cast<const char*>(&string_hash), sizeof(uint32_t));
+			}
+		}
 		fout.seekp(strings_array_offset_placeholder_offset);
 		fout.write(reinterpret_cast<const char*>(&strings_array_offset), sizeof(int64_t));
 	}
@@ -970,6 +1036,7 @@ int wmain(int argc, wchar_t ** argv)
 	}
 
 	constexpr std::wstring_view old_argument = L"-old";
+	constexpr std::wstring_view version3_argument = L"-v3";
 	constexpr std::wstring_view raw_text_signatures_argument = L"-raw-text-signatures=";
 	constexpr std::wstring_view all_uexps_argument = L"-all-uexps";
 	constexpr std::wstring_view src_argument = L"-src";
@@ -977,6 +1044,7 @@ int wmain(int argc, wchar_t ** argv)
 	const auto path_left = std::filesystem::path(args[1]);
 	const auto path_right = std::filesystem::path(args[2]);
 	bool old = false;
+	bool version3 = false;
 	bool all_uexps = false;
 	std::vector<std::string> raw_text_signatures;
 	bool src = false;
@@ -986,6 +1054,11 @@ int wmain(int argc, wchar_t ** argv)
 		if (args[i] == old_argument)
 		{
 			old = true;
+			continue;
+		}
+		if (args[i] == version3_argument)
+		{
+			version3 = true;
 			continue;
 		}
 		if (args[i] == all_uexps_argument)
@@ -1020,6 +1093,12 @@ int wmain(int argc, wchar_t ** argv)
 		}
 	}
 
+	if (old && version3)
+	{
+		std::wcerr << L"ERROR: -old and -v3 cannot be used together." << std::endl;
+		return 1;
+	}
+
 	if (std::filesystem::is_directory(path_left))
 	{
 		std::vector<FText> texts;
@@ -1052,7 +1131,7 @@ int wmain(int argc, wchar_t ** argv)
 		}
 		else if (path_right.extension() == L".locres")
 		{
-			write_to_locres_file(old, lv, path_right);
+			write_to_locres_file(old, version3, lv, path_right);
 			return 0;
 		}
 		else
@@ -1211,9 +1290,17 @@ int wmain(int argc, wchar_t ** argv)
 	}
 	else if (path_left.extension() == L".txt" && path_right.extension() == L".locres")
 	{
-		const auto lv = read_txt_file(path_left);
-		write_to_locres_file(old, lv, path_right);
-		return 0;
+		try
+		{
+			const auto lv = read_txt_file(path_left);
+			write_to_locres_file(old, version3, lv, path_right);
+			return 0;
+		}
+		catch (std::exception const& e)
+		{
+			std::cerr << "ERROR: TXT to LOCRES conversion failed: " << e.what() << std::endl;
+			return 1;
+		}
 	}
 	else if (path_left.extension() == L".txt" && path_right.extension() == L".txt")
 	{

@@ -14,11 +14,11 @@ Use `-all-uexps` modifier for additionaly parsing uexp files without matching ua
 Use `-src` modifier to add string source information (filenames) to the txt file.  
   
 Convert locres to txt or backward:  
-`UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old]`  
+`UE4TextExtractor.exe <path to texts.txt file> <path to texts.locres file> [-old|-v3]`  
 `UE4TextExtractor.exe <path to texts.locres file> <path to texts.txt file>`  
 Example: `UE4TextExtractor.exe "C:\MyGame\Content\Paks\texts.txt" "C:\MyGame\Content\Paks\texts.locres" -old`  
   
-Use `-old` modifier for old-version locres file generation.  
+Use `-old` for legacy locres file generation. Use `-v3` to write a version 3 locres file when converting TXT to LOCRES (or when extracting assets directly to LOCRES).  
   
 Add or replace all texts from one txt to another:  
 `UE4TextExtractor.exe <path to source_texts.txt file> <path to destination_texts.txt file>`  
