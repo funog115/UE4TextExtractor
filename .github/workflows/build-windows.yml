@@ -1,0 +1,92 @@
+name: Build and test UE4TextExtractor
+
+on:
+  push:
+    branches:
+      - master
+      - "feature/**"
+      - "fix/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Verify required ICU dependencies
+        shell: pwsh
+        run: |
+          $required = @(
+            "include/unicode/uchar.h",
+            "lib/icuuc.lib",
+            "lib/icudt.lib"
+          )
+          $missing = @($required | Where-Object { -not (Test-Path $_) })
+          if ($missing.Count -gt 0) {
+            Write-Error ("Missing required repository dependencies: " + ($missing -join ", "))
+          }
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          msbuild UE4TextExtractor.vcxproj /m /nologo /v:minimal /t:Rebuild /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test command-line behavior
+        shell: pwsh
+        run: |
+          $exe = "x64/Release/UE4TextExtractor.exe"
+          if (-not (Test-Path $exe)) {
+            $exe = "Release/UE4TextExtractor.exe"
+          }
+          if (-not (Test-Path $exe)) {
+            throw "Build succeeded but the expected executable was not found."
+          }
+
+          # No arguments must display usage and return a non-zero exit code.
+          & $exe *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Expected usage invocation without arguments to return non-zero."
+          }
+
+          # Conflicting output formats must be rejected before touching files.
+          & $exe "unused.txt" "unused.locres" -old -v3 *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Expected -old and -v3 together to be rejected."
+          }
+
+          # Version 3 generation is a format capability, not game-specific behavior.
+          # Full binary round-trip fixtures can be added separately.
+          Write-Host "CLI smoke tests passed."
+
+      - name: Stage executable artifact
+        if: success()
+        shell: pwsh
+        run: |
+          $exe = "x64/Release/UE4TextExtractor.exe"
+          if (-not (Test-Path $exe)) {
+            $exe = "Release/UE4TextExtractor.exe"
+          }
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item $exe "artifact/UE4TextExtractor.exe"
+          Copy-Item "README.md" "artifact/README.md"
+
+      - name: Upload executable
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UE4TextExtractor-windows-x64
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 14
