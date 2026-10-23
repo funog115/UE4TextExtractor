@@ -1050,6 +1050,12 @@ int wmain(int argc, wchar_t ** argv)
 		}
 	}
 
+	if (old && version3)
+	{
+		std::wcerr << L"ERROR: -old and -v3 cannot be used together." << std::endl;
+		return 1;
+	}
+
 	if (std::filesystem::is_directory(path_left))
 	{
 		std::vector<FText> texts;
