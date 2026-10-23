@@ -770,12 +770,34 @@ locres_vector read_txt_file(std::filesystem::path file)
 	locres_vector lv;
 
 	auto fin = std::ifstream{ file, std::ios::binary | std::ios::ate };
-	auto buffer = std::vector<char>(static_cast<size_t>(fin.tellg()) + 1);
+	if (fin.fail())
+		throw std::runtime_error("Could not open input TXT file.");
+
+	const auto file_size = fin.tellg();
+	if (file_size < 0)
+		throw std::runtime_error("Could not determine input TXT file size.");
+
+	auto buffer = std::vector<char>(static_cast<size_t>(file_size) + 1, '\0');
 	fin.seekg(0, std::ios::beg);
-	fin.read(buffer.data(), buffer.size() - 1);
+	if (!fin.read(buffer.data(), file_size))
+		throw std::runtime_error("Could not read input TXT file.");
 
 	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-	std::wstring lines = converter.from_bytes(buffer.data());
+	std::wstring lines;
+	try
+	{
+		lines = converter.from_bytes(buffer.data());
+	}
+	catch (std::exception const&)
+	{
+		throw std::runtime_error("Input TXT is not valid UTF-8.");
+	}
+
+	// Text editors commonly save UTF-8 files with a BOM. It is not part of
+	// the first namespace header, so remove it before parsing.
+	if (!lines.empty() && lines.front() == 0xFEFF)
+		lines.erase(lines.begin());
+
 	auto stream = std::wstringstream{ lines };
 
 	std::wstring line;
@@ -796,10 +818,27 @@ locres_vector read_txt_file(std::filesystem::path file)
 				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
 
 			line = line.substr(3);
-			const auto key = unescape_key(line.substr(0, line.find(L"]")));
-			line = line.substr(line.find(L"[") + 1);
-			const auto hash = std::stoul(line.substr(0, line.find(L"]")));
-			lv.back().second.push_back(FEntry{ key, hash, L"" });
+			const auto key_end = line.find(L"]");
+			const auto hash_start = line.find(L"[");
+			const auto hash_end = line.find(L"]", hash_start == std::wstring::npos ? 0 : hash_start + 1);
+			if (key_end == std::wstring::npos || hash_start == std::wstring::npos || hash_end == std::wstring::npos || hash_start < key_end)
+				throw std::runtime_error("Malformed key/hash entry in TXT file.");
+			const auto key = unescape_key(line.substr(0, key_end));
+			const auto hash_text = line.substr(hash_start + 1, hash_end - hash_start - 1);
+			if (lv.empty())
+				throw std::runtime_error("TXT entry appeared before a namespace header.");
+			if (hash_text.empty())
+				throw std::runtime_error("TXT entry has an empty hash.");
+			unsigned long parsed_hash = 0;
+			try
+			{
+				parsed_hash = std::stoul(hash_text);
+			}
+			catch (std::exception const&)
+			{
+				throw std::runtime_error("TXT entry has an invalid hash: " + converter.to_bytes(hash_text));
+			}
+			lv.back().second.push_back(FEntry{ key, static_cast<uint32_t>(parsed_hash), L"" });
 			mode = 1;
 			continue;
 		}
@@ -808,7 +847,10 @@ locres_vector read_txt_file(std::filesystem::path file)
 			if (mode == 1)
 				lv.back().second.back().s = lv.back().second.back().s.substr(0, lv.back().second.back().s.length() - 4);
 
-			const auto ns = unescape_key(line.substr(3, line.find(L"}") - 3));
+			const auto closing_brace = line.find(L"}");
+			if (closing_brace == std::wstring::npos)
+				throw std::runtime_error("Malformed namespace header in TXT file.");
+			const auto ns = unescape_key(line.substr(3, closing_brace - 3));
 			if (ns == L"[END]")
 				break;
 			lv.emplace_back();
@@ -1247,9 +1289,17 @@ int wmain(int argc, wchar_t ** argv)
 	}
 	else if (path_left.extension() == L".txt" && path_right.extension() == L".locres")
 	{
-		const auto lv = read_txt_file(path_left);
-		write_to_locres_file(old, version3, lv, path_right);
-		return 0;
+		try
+		{
+			const auto lv = read_txt_file(path_left);
+			write_to_locres_file(old, version3, lv, path_right);
+			return 0;
+		}
+		catch (std::exception const& e)
+		{
+			std::cerr << "ERROR: TXT to LOCRES conversion failed: " << e.what() << std::endl;
+			return 1;
+		}
 	}
 	else if (path_left.extension() == L".txt" && path_right.extension() == L".txt")
 	{
