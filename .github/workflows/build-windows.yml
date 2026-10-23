@@ -70,7 +70,38 @@ jobs:
             throw "Expected -old and -v3 together to be rejected."
           }
 
-          Write-Host "CLI smoke tests passed."
+          # Exercise real TXT -> LOCRES conversions, including a common UTF-8 BOM.
+          $fixture = @"
+=>{TestNamespace}
+
+=>[TestKey][123456]
+Hello from the fixture
+
+=>{[END]}
+"@
+          [System.IO.File]::WriteAllText("fixture.txt", $fixture, [System.Text.UTF8Encoding]::new($true))
+
+          & $exe "fixture.txt" "fixture-v1.locres"
+          $v1ExitCode = $LASTEXITCODE
+          if ($v1ExitCode -ne 0 -or -not (Test-Path "fixture-v1.locres")) {
+            throw "TXT -> version 1 LOCRES conversion failed (exit $v1ExitCode)."
+          }
+          $v1Bytes = [System.IO.File]::ReadAllBytes("fixture-v1.locres")
+          if ($v1Bytes.Length -lt 18 -or $v1Bytes[16] -ne 1) {
+            throw "Version 1 output has an invalid header."
+          }
+
+          & $exe "fixture.txt" "fixture-v3.locres" -v3
+          $v3ExitCode = $LASTEXITCODE
+          if ($v3ExitCode -ne 0 -or -not (Test-Path "fixture-v3.locres")) {
+            throw "TXT -> version 3 LOCRES conversion failed (exit $v3ExitCode)."
+          }
+          $v3Bytes = [System.IO.File]::ReadAllBytes("fixture-v3.locres")
+          if ($v3Bytes.Length -lt 22 -or $v3Bytes[16] -ne 3) {
+            throw "Version 3 output has an invalid header."
+          }
+
+          Write-Host "CLI smoke tests and TXT -> LOCRES conversions passed."
           exit 0
 
       - name: Stage executable artifact
